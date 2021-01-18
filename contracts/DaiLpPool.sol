@@ -1,16 +1,30 @@
 pragma solidity >=0.6.6;
+pragma experimental ABIEncoderV2;
 
 import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IDInterest.sol";
 import "./interfaces/IReward.sol";
-import "./interfaces/IVesting.sol";
 
-contract DaiLpPool is Ownable {
+struct Vest {
+    uint256 amount;
+    uint256 vestPeriodInSeconds;
+    uint256 creationTimestamp;
+    uint256 withdrawnAmount;
+}
+
+interface IVesting {
+    function withdrawVested(address account, uint256 vestIdx) external returns (uint256);
+    function getVestWithdrawableAmount(address account, uint256 vestIdx) external view returns (uint256);
+    function accountVestList(address account, uint256 vestIdx) external view returns (Vest memory);
+}
+
+contract DaiLpPool is Ownable, IERC721Receiver {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
@@ -38,6 +52,7 @@ contract DaiLpPool is Ownable {
         uint256 debaseRewardPerTokenPaid;
         uint256 daiDepositId;
         uint256 mphReward;
+        uint256 mphVestingIdx;
         uint256 maturationTimestamp;
         bool withdrawed;
     }
@@ -55,7 +70,6 @@ contract DaiLpPool is Ownable {
     IERC20 public mph;
     address public policy;
 
-    uint256 public lpLimit;
     uint256 public maxDepositLimit;
     uint256 public totalLpLimit;
     uint256 public lockPeriod;
@@ -67,9 +81,11 @@ contract DaiLpPool is Ownable {
     mapping (uint256 => DepositInfo) public deposits;
     mapping (address => uint256) public lpDeposits;
     mapping (uint256 => uint256) daiOffsetForMphStaking;   // DAI reward offset, times 1e12.
-    uint256 depositLength;
-    uint256 fee;
-    address treasury;
+    uint256 public depositLength;
+    uint256 public daiFee = 30;
+    uint256 public mphFee = 30;
+    uint256 public totalMphStaked;
+    address public treasury;
 
     uint256 public periodFinish;
     uint256 public debaseRewardRate;
@@ -77,8 +93,9 @@ contract DaiLpPool is Ownable {
     uint256 public debaseRewardPerTokenStored;
     uint256 public debaseRewardPercentage;
     uint256 public debaseRewardDistributed;
-    uint256 public accDaiPerMph;    // Accumulated DAI reward per staked mph, times 1e12.
-    uint256 firstVestIdx;
+    uint256 accDaiPerMph;    // Accumulated DAI reward per staked mph, times 1e12.
+    uint256 lastVestingIdx;
+    uint256 firstDepositForVesting;
 
     // params for debase reward
     uint256 public blockDuration;
@@ -92,7 +109,7 @@ contract DaiLpPool is Ownable {
 
     function _updateDebaseReward(uint256 depositId) internal {
         debaseRewardPerTokenStored = debaseRewardPerToken();
-        lastUpdateBlock = lastBlockRewardApplicable();
+        lastUpdateBlock = _lastBlockRewardApplicable();
         if (depositId < depositLength) {
             deposits[depositId].debaseReward = earned(depositId);
             deposits[depositId].debaseRewardPerTokenPaid = debaseRewardPerTokenStored;
@@ -109,7 +126,6 @@ contract DaiLpPool is Ownable {
         IReward _mphStakePool,
         IVesting _mphVesting,
         uint256 _lockPeriod,
-        uint256 _fee,
         address _treasury,
         uint256 _debaseRewardPercentage,
         uint256 _blockDuration
@@ -123,18 +139,16 @@ contract DaiLpPool is Ownable {
         daiFixedPool = _daiFixedPool;
         mphStakePool = _mphStakePool;
         mphVesting = _mphVesting;
-        lockPeriod= _lockPeriod;
-        fee = _fee;
+        lockPeriod = _lockPeriod;
         treasury = _treasury;
         debaseRewardPercentage = _debaseRewardPercentage;
         blockDuration = _blockDuration;
     }
 
     function _depositLpToken(uint256 amount) internal returns (uint256 daiAmount, uint256 debaseAmount) {
-        debaseDaiPair.transferFrom(msg.sender, address(this), amount);
         uint daiOldBalance = dai.balanceOf(address(this));
         uint debaseOldBalance = debase.balanceOf(address(this));
-        debaseDaiPair.transfer(address(debaseDaiPair), amount);
+        debaseDaiPair.transferFrom(msg.sender, address(debaseDaiPair), amount);
         debaseDaiPair.burn(address(this));
         uint daiBalance = dai.balanceOf(address(this));
         uint debaseBalance = debase.balanceOf(address(this));
@@ -145,23 +159,29 @@ contract DaiLpPool is Ownable {
 
     function _depositDai(uint daiAmount) internal returns (uint256 daiDepositId, uint256 maturationTimestamp) {
         maturationTimestamp = block.timestamp.add(lockPeriod);
+        dai.approve(address(daiFixedPool), daiAmount);
         daiFixedPool.deposit(daiAmount, maturationTimestamp);
         daiDepositId = daiFixedPool.depositsLength();
     }
 
     function _updateMphReward() internal {
+        if (totalMphStaked == 0) {
+            return;
+        }
         uint daiOldBalance = dai.balanceOf(address(this));
         mphStakePool.getReward();
         uint daiBalance = dai.balanceOf(address(this));
         uint daiReward = daiBalance.sub(daiOldBalance);
         accDaiPerMph = accDaiPerMph
             .add(daiReward.mul(1e12)
-            .div(mphStakePool.balanceOf(address(this))));
+            .div(totalMphStaked));
     }
 
     function _stakeMph(uint mphReward) internal {
         _updateMphReward();
+        mph.approve(address(mphStakePool), mphReward);
         mphStakePool.stake(mphReward);
+        totalMphStaked = totalMphStaked.add(mphReward);
     }
 
     function _unstakeMph(uint depositId) internal returns (uint daiReward) {
@@ -171,19 +191,30 @@ contract DaiLpPool is Ownable {
             .sub(daiOffsetForMphStaking[depositId])
             .div(1e12);
         mphStakePool.withdraw(deposits[depositId].mphReward);
+        totalMphStaked = totalMphStaked.sub(deposits[depositId].mphReward);
+    }
+
+    function _getCurrentVestingIdx() internal view returns (uint256) {
+        uint256 vestIdx = lastVestingIdx;
+        Vest memory vest = mphVesting.accountVestList(address(this), vestIdx);
+        while (vest.creationTimestamp < block.timestamp) {
+            vestIdx = vestIdx.add(1);
+            vest = mphVesting.accountVestList(address(this), vestIdx);
+        }
+        return vestIdx;
     }
 
     function _withdrawMphVested() internal {
         uint256 totalMphVested = 0;
-        for (uint256 depositId = firstVestIdx; depositId < depositLength; depositId += 1) {
-            uint256 vested = mphVesting.withdrawVested(address(this), depositId);
+        for (uint256 depositId = firstDepositForVesting; depositId < depositLength; depositId += 1) {
+            uint256 vested = mphVesting.withdrawVested(address(this), deposits[depositId].mphVestingIdx);
             if (vested > 0) {
                 totalMphVested = totalMphVested.add(vested);
                 deposits[depositId].mphReward = deposits[depositId].mphReward.add(vested);
                 daiOffsetForMphStaking[depositId] = daiOffsetForMphStaking[depositId].add(accDaiPerMph.mul(vested));
             }
             if (block.timestamp >= deposits[depositId].maturationTimestamp) {
-                firstVestIdx = depositId.add(1);
+                firstDepositForVesting = depositId.add(1);
             }
         }
         if (totalMphVested > 0) {
@@ -207,6 +238,8 @@ contract DaiLpPool is Ownable {
 
         _withdrawMphVested();
 
+        uint256 vestingIdx = _getCurrentVestingIdx();
+
         deposits[depositLength] = DepositInfo({
             owner: msg.sender,
             amount: amount,
@@ -217,8 +250,10 @@ contract DaiLpPool is Ownable {
             daiDepositId: daiDepositId,
             maturationTimestamp: maturationTimestamp,
             mphReward: 0,
+            mphVestingIdx: vestingIdx,
             withdrawed: false
         });
+        lastVestingIdx = vestingIdx.add(1);
         depositLength = depositLength.add(1);
 
         _updateDebaseReward(daiDepositId);
@@ -233,11 +268,13 @@ contract DaiLpPool is Ownable {
     function _withdrawDai(uint256 depositId, uint256 fundingId) internal {
         DepositInfo storage depositInfo = deposits[depositId];
 
-        uint daiOldBalance = dai.balanceOf(address(this));
         uint mphStakingDaiReward = _unstakeMph(depositId);
 
         uint mphOldBalance = mph.balanceOf(address(this));
+        mph.approve(address(daiFixedPool.mphMinter()), mphOldBalance);
+        uint daiOldBalance = dai.balanceOf(address(this));
         daiFixedPool.withdraw(depositInfo.daiDepositId, fundingId);
+        mph.approve(address(daiFixedPool.mphMinter()), 0);
         uint mphBalance = mph.balanceOf(address(this));
 
         uint daiBalance = dai.balanceOf(address(this));
@@ -245,14 +282,14 @@ contract DaiLpPool is Ownable {
         uint totalDaiReward = daiAmount.add(mphStakingDaiReward).sub(depositInfo.daiAmount);
 
         uint mphReward = depositInfo.mphReward.add(mphBalance).sub(mphOldBalance);
-        uint daiFee = totalDaiReward.mul(fee).div(1000);
-        uint mphFee = mphReward.mul(fee).div(1000);
+        uint daiFeeAmount = totalDaiReward.mul(daiFee).div(1000);
+        uint mphFeeAmount = mphReward.mul(mphFee).div(1000);
 
-        dai.transfer(depositInfo.owner, depositInfo.daiAmount.add(totalDaiReward.sub(daiFee)));
-        mph.transfer(depositInfo.owner, mphReward.sub(mphFee));
+        dai.transfer(depositInfo.owner, depositInfo.daiAmount.add(totalDaiReward.sub(daiFeeAmount)));
+        mph.transfer(depositInfo.owner, mphReward.sub(mphFeeAmount));
 
-        dai.transfer(treasury, daiFee);
-        mph.transfer(treasury, mphFee);
+        dai.transfer(treasury, daiFeeAmount);
+        mph.transfer(treasury, mphFeeAmount);
     }
 
     function _emergencyWithdrawDai(uint256 depositId, uint256 fundingId) internal {
@@ -326,7 +363,7 @@ contract DaiLpPool is Ownable {
      * @notice Function to set reward drop period
      */
     function setBlockDuration(uint256 blockDuration_) external onlyOwner {
-        require(blockDuration >= 1);
+        require(blockDuration_ >= 1, 'invalid duration');
         blockDuration = blockDuration_;
         emit LogSetBlockDuration(blockDuration);
     }
@@ -339,8 +376,12 @@ contract DaiLpPool is Ownable {
         emit LogSetPoolEnabled(poolEnabled);
     }
 
-    function setFee(uint256 _fee) external onlyOwner {
-        fee = _fee;
+    function setDaiFee(uint256 _daiFee) external onlyOwner {
+        daiFee = _daiFee;
+    }
+
+    function setMphFee(uint256 _mphFee) external onlyOwner {
+        mphFee = _mphFee;
     }
 
     function setTreasury(address _treasury) external onlyOwner {
@@ -348,12 +389,17 @@ contract DaiLpPool is Ownable {
         treasury = _treasury;
     }
 
-    function setLpLimit(uint256 _lpLimit) external onlyOwner {
-        lpLimit = _lpLimit;
+    function setPolicy(address _policy) external onlyOwner {
+        require (_policy != address(0), 'Invalid addr');
+        policy = _policy;
     }
 
     function setMaxDepositLimit(uint256 _maxDepositLimit) external onlyOwner {
         maxDepositLimit = _maxDepositLimit;
+    }
+
+    function setMaxDepositLimitEnabled(bool _maxDepositLimitEnabled) external onlyOwner {
+        maxDepositLimitEnabled = _maxDepositLimitEnabled;
     }
 
     function setTotalLpLimit(uint256 _totalLpLimit) external onlyOwner {
@@ -362,10 +408,6 @@ contract DaiLpPool is Ownable {
 
     function setTotalLpLimitEnabled(bool _totalLpLimitEnabled) external onlyOwner {
         totalLpLimitEnabled = _totalLpLimitEnabled;
-    }
-
-    function setMaxDepositLimitEnabled(bool _maxDepositLimitEnabled) external onlyOwner {
-        maxDepositLimitEnabled = _maxDepositLimitEnabled;
     }
 
     function setLockPeriod(uint256 _lockPeriod) external onlyOwner {
@@ -377,7 +419,7 @@ contract DaiLpPool is Ownable {
         allowEmergencyWithdraw = _allowEmergencyWithdraw;
     }
 
-    function lastBlockRewardApplicable() internal view returns (uint256) {
+    function _lastBlockRewardApplicable() internal view returns (uint256) {
         return Math.min(block.number, periodFinish);
     }
 
@@ -387,7 +429,7 @@ contract DaiLpPool is Ownable {
         }
         return
             debaseRewardPerTokenStored.add(
-                lastBlockRewardApplicable()
+                _lastBlockRewardApplicable()
                     .sub(lastUpdateBlock)
                     .mul(debaseRewardRate)
                     .mul(10**18)
@@ -407,15 +449,12 @@ contract DaiLpPool is Ownable {
     function _withdrawDebase(uint256 depositId) internal {
         _updateDebaseReward(depositId);
         uint256 reward = earned(depositId);
-        if (reward > 0) {
-            deposits[depositId].debaseReward = 0;
+        deposits[depositId].debaseReward = 0;
 
-            uint256 rewardToClaim =
-                debase.totalSupply().mul(reward).div(10**18);
+        uint256 rewardToClaim = debase.totalSupply().mul(reward).div(10**18);
 
-            debase.safeTransfer(deposits[depositId].owner, rewardToClaim.add(deposits[depositId].debaseGonAmount.div(_gonsPerFragment())));
-            debaseRewardDistributed = debaseRewardDistributed.add(reward);
-        }
+        debase.safeTransfer(deposits[depositId].owner, rewardToClaim.add(deposits[depositId].debaseGonAmount.div(_gonsPerFragment())));
+        debaseRewardDistributed = debaseRewardDistributed.add(reward);
     }
 
     function _emergencyWithdrawDebase(uint256 depositId) internal {
@@ -477,5 +516,9 @@ contract DaiLpPool is Ownable {
             debaseRewardRate,
             periodFinish
         );
+    }
+
+    function onERC721Received(address operator, address from, uint256 tokenId, bytes calldata data) external override returns (bytes4) {
+        return 0x150b7a02;
     }
 }
