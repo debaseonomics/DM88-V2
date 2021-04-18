@@ -1,14 +1,14 @@
 "use strict";
 
-var BN = require('bn.js');
+var BN = require("bn.js");
 
-var truffleContract = require('@truffle/contract');
+var truffleContract = require("@truffle/contract");
 
-var _require = require('@openzeppelin/test-helpers'),
+var _require = require("@openzeppelin/test-helpers"),
     time = _require.time,
     expectRevert = _require.expectRevert;
 
-var config = require('../../config.json');
+var config = require("../../config.json");
 
 var DaiLpPoolV2 = artifacts.require("DaiLpPoolV2");
 
@@ -28,8 +28,8 @@ var UniswapV2Pair = truffleContract(UniswapV2PairJson);
 UniswapV2Factory.setProvider(web3._provider);
 UniswapV2Router02.setProvider(web3._provider);
 UniswapV2Pair.setProvider(web3._provider);
-var decimals = new BN('18');
-contract('DaiLpPoolV2 Mainnet testing', function (accounts) {
+var decimals = new BN("18");
+contract("DaiLpPoolV2 Mainnet testing", function (accounts) {
   var treasury = accounts[9];
   var policy = accounts[0];
   var daiLpPool;
@@ -40,8 +40,8 @@ contract('DaiLpPoolV2 Mainnet testing', function (accounts) {
   var uniRouter02;
   var daiDebaseLp;
   var lpSupply;
-  var depositAmounts = [new BN('100').mul(new BN('10').pow(decimals))];
-  before('Get contract references', function _callee() {
+  var depositAmounts = [new BN("100").mul(new BN("10").pow(decimals))];
+  before("Get contract references", function _callee() {
     var lpAddress;
     return regeneratorRuntime.async(function _callee$(_context) {
       while (1) {
@@ -133,7 +133,7 @@ contract('DaiLpPoolV2 Mainnet testing', function (accounts) {
       }
     });
   });
-  it('Check deposit', function _callee2() {
+  it("Check deposit", function _callee2() {
     var mphUserOldBalance, mphTreasureOldBalance, mphUserBalance, mphPoolBalance, mphTreasureBalance, deposit, mphReward;
     return regeneratorRuntime.async(function _callee2$(_context2) {
       while (1) {
@@ -188,87 +188,69 @@ contract('DaiLpPoolV2 Mainnet testing', function (accounts) {
             _context2.t6.equal.call(_context2.t6, _context2.t7, _context2.t8);
 
             _context2.next = 26;
-            return regeneratorRuntime.awrap(expectRevert(daiLpPool.withdrawMphVested(1, {
-              from: accounts[1]
-            }), "no deposit"));
-
-          case 26:
-            _context2.next = 28;
-            return regeneratorRuntime.awrap(expectRevert(daiLpPool.withdrawMphVested(0, {
-              from: accounts[8]
-            }), "not owner"));
-
-          case 28:
-            _context2.next = 30;
-            return regeneratorRuntime.awrap(expectRevert(daiLpPool.withdrawMphVested(0, {
-              from: accounts[1]
-            }), "Not ready to withdarw mph"));
-
-          case 30:
-            _context2.next = 32;
             return regeneratorRuntime.awrap(time.increase(config.vestingPeriod));
 
-          case 32:
+          case 26:
             _context2.t9 = BN;
-            _context2.next = 35;
+            _context2.next = 29;
             return regeneratorRuntime.awrap(mph.balanceOf(accounts[1]));
 
-          case 35:
+          case 29:
             _context2.t10 = _context2.sent.toString();
             mphUserOldBalance = new _context2.t9(_context2.t10);
             _context2.t11 = BN;
-            _context2.next = 40;
+            _context2.next = 34;
             return regeneratorRuntime.awrap(mph.balanceOf(treasury));
 
-          case 40:
+          case 34:
             _context2.t12 = _context2.sent.toString();
             mphTreasureOldBalance = new _context2.t11(_context2.t12);
-            _context2.next = 44;
-            return regeneratorRuntime.awrap(daiLpPool.withdrawMphVested(0, {
-              from: accounts[1]
-            }));
-
-          case 44:
-            _context2.t13 = BN;
-            _context2.next = 47;
-            return regeneratorRuntime.awrap(mph.balanceOf(accounts[1]));
-
-          case 47:
-            _context2.t14 = _context2.sent.toString();
-            mphUserBalance = new _context2.t13(_context2.t14);
-            _context2.t15 = BN;
-            _context2.next = 52;
-            return regeneratorRuntime.awrap(mph.balanceOf(daiLpPool.address));
-
-          case 52:
-            _context2.t16 = _context2.sent.toString();
-            mphPoolBalance = new _context2.t15(_context2.t16);
-            _context2.t17 = BN;
-            _context2.next = 57;
-            return regeneratorRuntime.awrap(mph.balanceOf(treasury));
-
-          case 57:
-            _context2.t18 = _context2.sent.toString();
-            mphTreasureBalance = new _context2.t17(_context2.t18);
-            _context2.next = 61;
-            return regeneratorRuntime.awrap(daiLpPool.deposits(0));
-
-          case 61:
-            deposit = _context2.sent;
-            mphReward = new BN(deposit['mphReward'].toString());
-            assert.equal(mphUserBalance.sub(mphUserOldBalance).add(mphPoolBalance).add(mphTreasureBalance).sub(mphTreasureOldBalance).toString(), mphReward.toString());
-            assert.equal(mphPoolBalance.toString(), mphReward.mul(new BN(config.mphTakingBackMultiplier)).div(new BN("10").pow(new BN("18"))).toString());
-            assert.equal(mphTreasureBalance.sub(mphTreasureOldBalance).toString(), mphReward.sub(mphPoolBalance).mul(new BN(config.mphFee.toString())).div(new BN("1000")).toString());
-            _context2.next = 68;
-            return regeneratorRuntime.awrap(time.increase(config.lockPeriod));
-
-          case 68:
-            _context2.next = 70;
+            _context2.next = 38;
             return regeneratorRuntime.awrap(daiLpPool.withdraw(0, 0, {
               from: accounts[1]
             }));
 
-          case 70:
+          case 38:
+            _context2.t13 = BN;
+            _context2.next = 41;
+            return regeneratorRuntime.awrap(mph.balanceOf(accounts[1]));
+
+          case 41:
+            _context2.t14 = _context2.sent.toString();
+            mphUserBalance = new _context2.t13(_context2.t14);
+            _context2.t15 = BN;
+            _context2.next = 46;
+            return regeneratorRuntime.awrap(mph.balanceOf(daiLpPool.address));
+
+          case 46:
+            _context2.t16 = _context2.sent.toString();
+            mphPoolBalance = new _context2.t15(_context2.t16);
+            _context2.t17 = BN;
+            _context2.next = 51;
+            return regeneratorRuntime.awrap(mph.balanceOf(treasury));
+
+          case 51:
+            _context2.t18 = _context2.sent.toString();
+            mphTreasureBalance = new _context2.t17(_context2.t18);
+            _context2.next = 55;
+            return regeneratorRuntime.awrap(daiLpPool.deposits(0));
+
+          case 55:
+            deposit = _context2.sent;
+            mphReward = new BN(deposit["mphReward"].toString());
+            assert.equal(mphUserBalance.sub(mphUserOldBalance).add(mphPoolBalance).add(mphTreasureBalance).sub(mphTreasureOldBalance).toString(), mphReward.toString());
+            assert.equal(mphPoolBalance.toString(), mphReward.mul(new BN(config.mphTakingBackMultiplier)).div(new BN("10").pow(new BN("18"))).toString());
+            assert.equal(mphTreasureBalance.sub(mphTreasureOldBalance).toString(), mphReward.sub(mphPoolBalance).mul(new BN(config.mphFee.toString())).div(new BN("1000")).toString());
+            _context2.next = 62;
+            return regeneratorRuntime.awrap(time.increase(config.lockPeriod));
+
+          case 62:
+            _context2.next = 64;
+            return regeneratorRuntime.awrap(daiLpPool.withdraw(0, 0, {
+              from: accounts[1]
+            }));
+
+          case 64:
           case "end":
             return _context2.stop();
         }
