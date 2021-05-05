@@ -59,11 +59,12 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
 
     event onDeposit(
         address indexed user,
-        uint256 amount,
+        uint256 daiAmount,
+        uint256 debaseAmount,
         uint256 maturationTimestamp,
         uint256 depositId
     );
-    event onWithdraw(address indexed user, uint256 amount, uint256 depositId);
+    event onWithdraw(address indexed user, uint256 depositId);
     event onWithdrawMphVested(
         address indexed user,
         uint256 amount,
@@ -83,7 +84,6 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
 
     struct DepositInfo {
         address owner;
-        uint256 amount;
         uint256 daiAmount;
         uint256 debaseGonAmount;
         uint256 debaseReward;
@@ -108,8 +108,8 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     IERC20 public mph;
     address public policy;
 
-    uint256 public maxDepositLimit;
     uint256 public lockPeriod;
+    uint256 public totalDaiLocked;
 
     mapping(uint256 => DepositInfo) public deposits;
     mapping(address => uint256[]) public depositIds;
@@ -241,7 +241,6 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
 
         deposits[depositLength] = DepositInfo({
             owner: msg.sender,
-            amount: amount,
             daiAmount: daiAmount,
             debaseGonAmount: debaseAmount.mul(_gonsPerFragment()),
             debaseReward: 0,
@@ -260,7 +259,8 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         _updateDebaseReward(daiDepositId);
         emit onDeposit(
             msg.sender,
-            amount,
+            daiAmount,
+            debaseAmount,
             maturationTimestamp,
             depositLength.sub(1)
         );
@@ -315,7 +315,8 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         _withdrawDai(depositId, fundingId);
         _withdrawDebase(depositId);
         depositInfo.withdrawed = true;
-        emit onWithdraw(user, depositInfo.amount, depositId);
+        totalDaiLocked = totalDaiLocked.sub(depositInfo.daiAmount);
+        emit onWithdraw(user, depositId);
     }
 
     function withdraw(uint256 depositId, uint256 fundingId)
@@ -398,7 +399,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     }
 
     function debaseRewardPerToken() public view returns (uint256) {
-        if (totalLpLocked == 0) {
+        if (totalDaiLocked == 0) {
             return debaseRewardPerTokenStored;
         }
         return
@@ -407,7 +408,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
                     .sub(lastUpdateBlock)
                     .mul(debaseRewardRate)
                     .mul(10**18)
-                    .div(totalLpLocked)
+                    .div(totalDaiLocked)
             );
     }
 
@@ -415,7 +416,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         require(depositId < depositLength, "no deposit");
         return
             deposits[depositId]
-                .amount
+                .daiAmount
                 .mul(
                 debaseRewardPerToken().sub(
                     deposits[depositId].debaseRewardPerTokenPaid
