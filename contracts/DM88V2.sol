@@ -17,16 +17,14 @@
 * Coded by: Ryuhei Matsuda, PunkUnknown
 */
 
-pragma solidity >=0.6.6;
-pragma experimental ABIEncoderV2;
+pragma solidity >=0.8.0;
 
-import "@openzeppelin/contracts/math/SafeMath.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/math/Math.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "./interfaces/IUniswapV2Pair.sol";
 import "./interfaces/IDInterest.sol";
 
@@ -54,7 +52,6 @@ interface IVesting {
 }
 
 contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
-    using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     event onDeposit(
@@ -83,6 +80,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     );
 
     struct DepositInfo {
+        uint256 rewardIndex;
         address owner;
         uint256 daiAmount;
         uint256 debaseGonAmount;
@@ -97,7 +95,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
 
     uint256 private constant MAX_UINT256 = ~uint256(0);
     uint256 private constant INITIAL_FRAGMENTS_SUPPLY = 1000000 * 10**18;
-    uint256 private constant TOTAL_GONS =
+    uint256 public constant TOTAL_GONS =
         MAX_UINT256 - (MAX_UINT256 % INITIAL_FRAGMENTS_SUPPLY);
 
     IUniswapV2Pair public debaseDaiPair;
@@ -120,10 +118,14 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     uint256 public mphTakeBackMultiplier = 300000000000000000;
     address public treasury;
 
-    uint256 public periodFinish;
-    uint256 public debaseRewardRate;
-    uint256 public lastUpdateBlock;
-    uint256 public debaseRewardPerTokenStored;
+    mapping(uint256 => uint256) public periodFinish;
+    mapping(uint256 => uint256) public debaseRewardRate;
+    mapping(uint256 => uint256) public lastUpdateBlock;
+    mapping(uint256 => uint256) public debaseRewardPerTokenStored;
+
+    uint256 public activeRewardIndex;
+    bool public firstCycleRewarded;
+
     uint256 public debaseRewardPercentage;
     uint256 public debaseRewardDistributed;
     uint256 lastVestingIdx;
@@ -138,13 +140,19 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         _;
     }
 
-    function _updateDebaseReward(uint256 depositId) internal {
-        debaseRewardPerTokenStored = debaseRewardPerToken();
-        lastUpdateBlock = _lastBlockRewardApplicable();
+    function _updateDebaseReward(uint256 depositId, uint256 rewardIndex)
+        internal
+    {
+        debaseRewardPerTokenStored[rewardIndex] = debaseRewardPerToken(
+            rewardIndex
+        );
+        lastUpdateBlock[rewardIndex] = _lastBlockRewardApplicable(rewardIndex);
         if (depositId < depositLength) {
             deposits[depositId].debaseReward = earned(depositId);
             deposits[depositId]
-                .debaseRewardPerTokenPaid = debaseRewardPerTokenStored;
+                .debaseRewardPerTokenPaid = debaseRewardPerTokenStored[
+                rewardIndex
+            ];
         }
     }
 
@@ -160,7 +168,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         address _treasury,
         uint256 _debaseRewardPercentage,
         uint256 _blockDuration
-    ) public Ownable() {
+    ) Ownable() {
         require(_treasury != address(0), "Invalid addr");
         debaseDaiPair = _debaseDaiPair;
         dai = _dai;
@@ -179,7 +187,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         internal
         returns (uint256 daiDepositId, uint256 maturationTimestamp)
     {
-        maturationTimestamp = block.timestamp.add(lockPeriod);
+        maturationTimestamp = block.timestamp + lockPeriod;
         dai.approve(address(daiFixedPool), daiAmount);
         daiFixedPool.deposit(daiAmount, maturationTimestamp);
         daiDepositId = daiFixedPool.depositsLength();
@@ -189,7 +197,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         uint256 vestIdx = lastVestingIdx;
         Vest memory vest = mphVesting.accountVestList(address(this), vestIdx);
         while (vest.creationTimestamp < block.timestamp) {
-            vestIdx = vestIdx.add(1);
+            vestIdx = vestIdx + 1;
             vest = mphVesting.accountVestList(address(this), vestIdx);
         }
         return vestIdx;
@@ -206,20 +214,19 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
             mphVesting.accountVestList(address(this), _vestingIdx);
         require(
             block.timestamp >=
-                vest.creationTimestamp.add(vest.vestPeriodInSeconds),
+                vest.creationTimestamp + vest.vestPeriodInSeconds,
             "Not ready to withdarw mph"
         );
         uint256 vested = mphVesting.withdrawVested(address(this), _vestingIdx);
 
         if (vested > 0) {
-            deposits[depositId].mphReward = deposits[depositId].mphReward.add(
-                vested
-            );
-            uint256 takeBackAmount =
-                vested.mul(mphTakeBackMultiplier).div(1e18);
-            uint256 mphVested = vested.sub(takeBackAmount);
-            uint256 mphFeeAmount = mphVested.mul(mphFee).div(1000);
-            mph.transfer(depositInfo.owner, mphVested.sub(mphFeeAmount));
+            deposits[depositId].mphReward =
+                deposits[depositId].mphReward +
+                vested;
+            uint256 takeBackAmount = (vested * mphTakeBackMultiplier) / 1e18;
+            uint256 mphVested = vested - takeBackAmount;
+            uint256 mphFeeAmount = (mphVested * mphFee) / 1000;
+            mph.transfer(depositInfo.owner, mphVested - mphFeeAmount);
             mph.transfer(treasury, mphFeeAmount);
 
             emit onWithdrawMphVested(depositInfo.owner, mphVested, depositId);
@@ -240,9 +247,10 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         uint256 vestingIdx = _getCurrentVestingIdx();
 
         deposits[depositLength] = DepositInfo({
+            rewardIndex: activeRewardIndex,
             owner: msg.sender,
             daiAmount: daiAmount,
-            debaseGonAmount: debaseAmount.mul(_gonsPerFragment()),
+            debaseGonAmount: debaseAmount * _gonsPerFragment(),
             debaseReward: 0,
             debaseRewardPerTokenPaid: 0,
             daiDepositId: daiDepositId,
@@ -253,18 +261,18 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         });
         depositIds[msg.sender].push(depositLength);
 
-        lastVestingIdx = vestingIdx.add(1);
-        depositLength = depositLength.add(1);
+        lastVestingIdx = vestingIdx + 1;
+        depositLength = depositLength + 1;
 
-        _updateDebaseReward(daiDepositId);
+        _updateDebaseReward(daiDepositId, activeRewardIndex);
         emit onDeposit(
             msg.sender,
             daiAmount,
             debaseAmount,
             maturationTimestamp,
-            depositLength.sub(1)
+            depositLength - 1
         );
-        return depositLength.sub(1);
+        return depositLength - 1;
     }
 
     function userDepositLength(address user) external view returns (uint256) {
@@ -272,7 +280,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     }
 
     function _gonsPerFragment() internal view returns (uint256) {
-        return TOTAL_GONS.div(debase.totalSupply());
+        return TOTAL_GONS / debase.totalSupply();
     }
 
     function _withdrawDai(uint256 depositId, uint256 fundingId) internal {
@@ -285,14 +293,13 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         mph.approve(address(daiFixedPool.mphMinter()), 0);
 
         uint256 daiBalance = dai.balanceOf(address(this));
-        uint256 daiReward =
-            daiBalance.sub(daiOldBalance).sub(depositInfo.daiAmount);
+        uint256 daiReward = daiBalance - daiOldBalance - depositInfo.daiAmount;
 
-        uint256 daiFeeAmount = daiReward.mul(daiFee).div(1000);
+        uint256 daiFeeAmount = (daiReward * daiFee) / 1000;
 
         dai.transfer(
             depositInfo.owner,
-            depositInfo.daiAmount.add(daiReward.sub(daiFeeAmount))
+            depositInfo.daiAmount + daiReward - daiFeeAmount
         );
         dai.transfer(treasury, daiFeeAmount);
     }
@@ -315,7 +322,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         _withdrawDai(depositId, fundingId);
         _withdrawDebase(depositId);
         depositInfo.withdrawed = true;
-        totalDaiLocked = totalDaiLocked.sub(depositInfo.daiAmount);
+        totalDaiLocked = totalDaiLocked - depositInfo.daiAmount;
         emit onWithdraw(user, depositId);
     }
 
@@ -327,12 +334,12 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     }
 
     function multiWithdraw(
-        uint256[] calldata depositIds,
-        uint256[] calldata fundingIds
+        uint256[] calldata depositIds_,
+        uint256[] calldata fundingIds_
     ) external nonReentrant {
-        require(depositIds.length == fundingIds.length, "incorrect length");
-        for (uint256 i = 0; i < depositIds.length; i += 1) {
-            _withdraw(msg.sender, depositIds[i], fundingIds[i]);
+        require(depositIds_.length == fundingIds_.length, "incorrect length");
+        for (uint256 i = 0; i < depositIds_.length; i += 1) {
+            _withdraw(msg.sender, depositIds_[i], fundingIds_[i]);
         }
     }
 
@@ -394,52 +401,54 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         lockPeriod = _lockPeriod;
     }
 
-    function _lastBlockRewardApplicable() internal view returns (uint256) {
-        return Math.min(block.number, periodFinish);
+    function _lastBlockRewardApplicable(uint256 rewardIndex)
+        internal
+        view
+        returns (uint256)
+    {
+        return Math.min(block.number, periodFinish[rewardIndex]);
     }
 
-    function debaseRewardPerToken() public view returns (uint256) {
+    function debaseRewardPerToken(uint256 rewardIndex)
+        public
+        view
+        returns (uint256)
+    {
         if (totalDaiLocked == 0) {
-            return debaseRewardPerTokenStored;
+            return debaseRewardPerTokenStored[rewardIndex];
         }
+
         return
-            debaseRewardPerTokenStored.add(
-                _lastBlockRewardApplicable()
-                    .sub(lastUpdateBlock)
-                    .mul(debaseRewardRate)
-                    .mul(10**18)
-                    .div(totalDaiLocked)
-            );
+            (debaseRewardPerTokenStored[rewardIndex] +
+                _lastBlockRewardApplicable(rewardIndex) -
+                lastUpdateBlock[rewardIndex] *
+                debaseRewardRate[rewardIndex] *
+                10**18) / totalDaiLocked;
     }
 
     function earned(uint256 depositId) public view returns (uint256) {
         require(depositId < depositLength, "no deposit");
         return
-            deposits[depositId]
-                .daiAmount
-                .mul(
-                debaseRewardPerToken().sub(
-                    deposits[depositId].debaseRewardPerTokenPaid
-                )
-            )
-                .div(10**18)
-                .add(deposits[depositId].debaseReward);
+            deposits[depositId].daiAmount *
+            debaseRewardPerToken(deposits[depositId].rewardIndex) -
+            deposits[depositId].debaseRewardPerTokenPaid /
+            10**18 +
+            deposits[depositId].debaseReward;
     }
 
     function _withdrawDebase(uint256 depositId) internal {
-        _updateDebaseReward(depositId);
+        _updateDebaseReward(depositId, deposits[depositId].rewardIndex);
         uint256 reward = earned(depositId);
         deposits[depositId].debaseReward = 0;
 
-        uint256 rewardToClaim = debase.totalSupply().mul(reward).div(10**18);
+        uint256 rewardToClaim = (debase.totalSupply() * reward) / 10**18;
 
         debase.safeTransfer(
             deposits[depositId].owner,
-            rewardToClaim.add(
-                deposits[depositId].debaseGonAmount.div(_gonsPerFragment())
-            )
+            (rewardToClaim + deposits[depositId].debaseGonAmount) /
+                _gonsPerFragment()
         );
-        debaseRewardDistributed = debaseRewardDistributed.add(reward);
+        debaseRewardDistributed = debaseRewardDistributed + reward;
     }
 
     function checkStabilizerAndGetReward(
@@ -453,9 +462,15 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
             "Only debase policy contract can call this"
         );
 
-        if (block.number > periodFinish) {
+        if (block.number > periodFinish[activeRewardIndex]) {
             uint256 rewardToClaim =
-                debasePolicyBalance.mul(debaseRewardPercentage).div(10**18);
+                (debasePolicyBalance * debaseRewardPercentage) / 10**18;
+
+            if (firstCycleRewarded) {
+                activeRewardIndex = activeRewardIndex + 1;
+            } else {
+                firstCycleRewarded = true;
+            }
 
             if (debasePolicyBalance >= rewardToClaim) {
                 startNewDistribtionCycle(rewardToClaim);
@@ -466,24 +481,19 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
     }
 
     function startNewDistribtionCycle(uint256 amount) internal {
-        _updateDebaseReward(depositLength);
-        uint256 poolTotalShare = amount.mul(10**18).div(debase.totalSupply());
+        _updateDebaseReward(depositLength, activeRewardIndex);
+        uint256 poolTotalShare = (amount * 10**18) / debase.totalSupply();
 
-        if (block.number >= periodFinish) {
-            debaseRewardRate = poolTotalShare.div(blockDuration);
-        } else {
-            uint256 remaining = periodFinish.sub(block.number);
-            uint256 leftover = remaining.mul(debaseRewardRate);
-            debaseRewardRate = poolTotalShare.add(leftover).div(blockDuration);
-        }
-        lastUpdateBlock = block.number;
-        periodFinish = block.number.add(blockDuration);
+        debaseRewardRate[activeRewardIndex] = poolTotalShare / blockDuration;
+
+        lastUpdateBlock[activeRewardIndex] = block.number;
+        periodFinish[activeRewardIndex] = block.number + blockDuration;
 
         emit LogStartNewDistribtionCycle(
             poolTotalShare,
             amount,
-            debaseRewardRate,
-            periodFinish
+            debaseRewardRate[activeRewardIndex],
+            periodFinish[activeRewardIndex]
         );
     }
 
@@ -492,7 +502,7 @@ contract DM88V2 is Ownable, IERC721Receiver, ReentrancyGuard {
         address from,
         uint256 tokenId,
         bytes calldata data
-    ) external override returns (bytes4) {
+    ) external pure override returns (bytes4) {
         return 0x150b7a02;
     }
 }
